@@ -1,0 +1,32 @@
+# Environment variables & secrets
+.env
+.env.*
+!.env.example
+
+# Python caches and bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environment
+jevEnv/
+venv/
+.venv/
+env/
+
+# Logs
+logs/
+*.log
+*.log.*
+
+# ViZDoom local configuration & runtime files
+_vizdoom.ini
+_vizdoom/
+_vizdoom*
+
+# IDE & OS files
+.vscode/
+.idea/
+.DS_Store
+*.swp
