@@ -29,27 +29,53 @@ log.addHandler(_handler)
 class ChoiceQuestionResponse(BaseModel):
     value: str
     confidence: float
+    probabilities: dict[str, float] = {}
+    question_text: str = ""
 
     @classmethod
-    def from_api(cls, data: dict) -> "ChoiceQuestionResponse":
+    def from_api(cls, data: dict, question_text: str = "") -> "ChoiceQuestionResponse":
+        val = data.get("choice", data.get("value", "none"))
+        conf = float(data.get("confidence", 1.0))
+        raw_probs = data.get("probabilities", {})
+        probs = {k: float(v) for k, v in raw_probs.items()} if isinstance(raw_probs, dict) else {}
+        if not probs and val != "none":
+            probs = {val: conf}
         return cls(
-            value=data.get("choice", data.get("value", "none")),
-            confidence=data.get("confidence", 1.0),
+            value=val,
+            confidence=conf,
+            probabilities=probs,
+            question_text=question_text,
         )
 
 
 class NoulQuestionResponse(BaseModel):
     value: bool
     confidence: float
+    probabilities: dict[str, float] = {}
+    question_text: str = ""
 
     @classmethod
-    def from_api(cls, data: dict) -> "NoulQuestionResponse":
+    def from_api(
+        cls,
+        data: dict,
+        true_label: str = "true",
+        false_label: str = "false",
+        question_text: str = "",
+    ) -> "NoulQuestionResponse":
         raw = data.get("noul", data.get("value", 0.0))
-        # noul is the raw P(true) probability in [0,1]
-        # value = True if probability >= 0.5
-        # confidence = raw probability (so firing.confidence=0.55 when noul=0.55)
         prob = float(raw) if isinstance(raw, (int, float)) else 0.0
-        return cls(value=prob >= 0.5, confidence=prob)
+        prob = max(0.0, min(1.0, prob))
+        probs = {
+            false_label: round(1.0 - prob, 3),
+            true_label: round(prob, 3),
+        }
+        # In UI, confidence can be highest prob or the raw calibrated prob
+        return cls(
+            value=prob >= 0.5,
+            confidence=prob,
+            probabilities=probs,
+            question_text=question_text,
+        )
 
 
 class JevResponse(BaseModel):
@@ -59,6 +85,7 @@ class JevResponse(BaseModel):
     rotation:   ChoiceQuestionResponse
     jump:       NoulQuestionResponse
     firing:     NoulQuestionResponse
+    raw_answers: dict = {}
 
 
 class VisibleEnemy:
@@ -165,13 +192,37 @@ class JevClient:
             data = response.json()
             answers = data.get("answers", {})
 
+            q_cfg = payload.get("questions", {})
             return JevResponse(
-                macro_goal=ChoiceQuestionResponse.from_api(answers.get("macro_goal", {"choice": "explore",  "confidence": 1.0})),
-                target=    ChoiceQuestionResponse.from_api(answers.get("target",     {"choice": "none",      "confidence": 1.0})),
-                movement=  ChoiceQuestionResponse.from_api(answers.get("movement",   {"choice": "forward",   "confidence": 1.0})),
-                rotation=  ChoiceQuestionResponse.from_api(answers.get("rotation",   {"choice": "none",      "confidence": 1.0})),
-                jump=      NoulQuestionResponse.from_api(  answers.get("jump",       {"noul": 0.0})),
-                firing=    NoulQuestionResponse.from_api(  answers.get("firing",     {"noul": 0.0})),
+                macro_goal=ChoiceQuestionResponse.from_api(
+                    answers.get("macro_goal", {"choice": "explore", "confidence": 1.0}),
+                    question_text=q_cfg.get("macro_goal", {}).get("instructions", "What is the player's overarching objective right now?"),
+                ),
+                target=ChoiceQuestionResponse.from_api(
+                    answers.get("target", {"choice": "none", "confidence": 1.0}),
+                    question_text=q_cfg.get("target", {}).get("instructions", "Which enemy in line of sight should the player aim at?"),
+                ),
+                movement=ChoiceQuestionResponse.from_api(
+                    answers.get("movement", {"choice": "forward", "confidence": 1.0}),
+                    question_text=q_cfg.get("movement", {}).get("instructions", "Which directional movement should the player execute?"),
+                ),
+                rotation=ChoiceQuestionResponse.from_api(
+                    answers.get("rotation", {"choice": "none", "confidence": 1.0}),
+                    question_text=q_cfg.get("rotation", {}).get("instructions", "How should the player rotate to aim or avoid walls?"),
+                ),
+                jump=NoulQuestionResponse.from_api(
+                    answers.get("jump", {"noul": 0.0}),
+                    true_label="jump",
+                    false_label="stay_grounded",
+                    question_text=q_cfg.get("jump", {}).get("instructions", "Should the player jump right now?"),
+                ),
+                firing=NoulQuestionResponse.from_api(
+                    answers.get("firing", {"noul": 0.0}),
+                    true_label="fire",
+                    false_label="hold_fire",
+                    question_text=q_cfg.get("firing", {}).get("instructions", "Should the player's trigger be held down right now?"),
+                ),
+                raw_answers=answers,
             )
         except Exception as e:
             log.error(

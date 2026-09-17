@@ -21,7 +21,7 @@ from agent.state_serializer import serialize_state
 from agent.jev_client import JevClient, VisibleEnemy
 from agent.composition_dag import resolve_dag, ENEMY_CLASSES
 from agent.actuator import format_action_array
-from ui.terminal_hud import create_hud_layout, update_hud
+from ui.pygame_gui import DoomPygameApp
 
 load_dotenv()
 
@@ -34,18 +34,8 @@ TICKS_PER_DECISION  = 4            # Fire API every 4 ticks ≈ 8.75 Hz (≈10 H
 
 NOOP = [0] * 8   # 8 buttons: ATTACK, FWD, BACK, LEFT, RIGHT, TURN_L, TURN_R, JUMP
 
-# Initial Standing Orders (updatable at runtime via stdin)
+# Initial Standing Orders (updatable at runtime via the UI input box)
 STANDING_ORDERS = "survive encounters, collect health if critical, eliminate visible hostiles."
-
-
-async def input_listener():
-    """Async stdin hook — type new orders and press Enter to update the agent."""
-    global STANDING_ORDERS
-    loop = asyncio.get_event_loop()
-    while True:
-        new_orders = await loop.run_in_executor(None, input)
-        if new_orders.strip():
-            STANDING_ORDERS = new_orders.strip()
 
 
 def _collect_enemies(state, player_x: float, player_y: float) -> list[VisibleEnemy]:
@@ -81,6 +71,7 @@ def _collect_enemies(state, player_x: float, player_y: float) -> list[VisibleEne
 
 
 async def run_game():
+    global STANDING_ORDERS
     game = vzd.DoomGame()
 
     cfg_path = os.path.join(os.path.dirname(__file__), "config", "custom_scenario.cfg")
@@ -100,119 +91,117 @@ async def run_game():
     game.set_automap_buffer_enabled(False)
     game.set_objects_info_enabled(True)
     game.set_sectors_info_enabled(True)
-    game.set_window_visible(True)
+    game.set_window_visible(False)
     game.init()
 
     jev_client = JevClient()
-    hud_layout = create_hud_layout()
+    app = DoomPygameApp()
+    app.standing_orders = STANDING_ORDERS
 
-    with Live(hud_layout, refresh_per_second=8, screen=True):
-        try:
-            for _episode in range(999):          # run until user quits
-                game.new_episode()
+    try:
+        for _episode in range(999):          # run until user quits
+            game.new_episode()
 
-                # Spawn bots in deathmatch episodes
-                if "deathmatch" in scenario_name.lower():
-                    for _ in range(3):
-                        game.send_game_command("addbot")
+            # Spawn bots in deathmatch episodes
+            if "deathmatch" in scenario_name.lower():
+                for _ in range(3):
+                    game.send_game_command("addbot")
 
-                # Per-episode state for the decoupled loop
-                current_action    = NOOP[:]  # action being replayed between decisions
-                decision          = None      # latest JevResponse
-                decision_dict:dict= {}
-                api_latency_ms    = 0.0
-                tick_count        = 0         # ticks since last API call
-                state_yaml        = ""
+            # Per-episode state for the decoupled loop
+            current_action    = NOOP[:]  # action being replayed between decisions
+            decision          = None      # latest JevResponse
+            api_latency_ms    = 0.0
+            tick_count        = 0         # ticks since last API call
+            state_yaml        = ""
 
-                # Pending async API task (None = no request in flight)
-                api_task: asyncio.Task | None = None
+            # Pending async API task (None = no request in flight)
+            api_task: asyncio.Task | None = None
 
-                while not game.is_episode_finished():
-                    # ── Respawn if dead (deathmatch) ───────────────────────
-                    if game.is_player_dead():
-                        game.respawn_player()
-                        tick_count = TICKS_PER_DECISION  # trigger fresh API on respawn
-                        continue
+            while not game.is_episode_finished():
+                # ── Handle Pygame UI events (mouse, keyboard, orders input) ─
+                running, new_orders = app.handle_events()
+                if not running:
+                    return
+                if new_orders:
+                    STANDING_ORDERS = new_orders
 
-                    state = game.get_state()
-                    if state is None:
-                        game.make_action(NOOP, 1)
-                        continue
+                # ── Respawn if dead (deathmatch) ───────────────────────
+                if game.is_player_dead():
+                    game.respawn_player()
+                    tick_count = TICKS_PER_DECISION  # trigger fresh API on respawn
+                    continue
 
-                    player_x = state.game_variables[4]
-                    player_y = state.game_variables[5]
+                state = game.get_state()
+                if state is None:
+                    game.make_action(NOOP, 1)
+                    app.render(None)
+                    continue
 
-                    # ── Poll pending API task ──────────────────────────────
-                    if api_task is not None and api_task.done():
-                        api_end = time.perf_counter()
-                        try:
-                            decision = api_task.result()
-                            api_latency_ms = (api_end - api_start) * 1000
-                        except Exception:
-                            decision = None
-                        api_task = None
+                player_x = state.game_variables[4]
+                player_y = state.game_variables[5]
 
-                        # Recompute action from latest decision + current state
-                        if decision:
-                            action_tuple   = resolve_dag(decision, state)
-                            current_action = format_action_array(
-                                action_tuple, firing_confidence=decision.firing.confidence
-                            )
-                            decision_dict  = {
-                                "macro_goal": {"value": decision.macro_goal.value, "confidence": decision.macro_goal.confidence},
-                                "target":     {"value": decision.target.value,     "confidence": decision.target.confidence},
-                                "movement":   {"value": decision.movement.value,   "confidence": decision.movement.confidence},
-                                "rotation":   {"value": decision.rotation.value,   "confidence": decision.rotation.confidence},
-                                "jump":       {"value": decision.jump.value,       "confidence": decision.jump.confidence},
-                                "firing":     {"value": decision.firing.value,     "confidence": decision.firing.confidence},
-                            }
-                        else:
-                            current_action = NOOP[:]
-                            decision_dict  = {}
-
-                        update_hud(hud_layout, state_yaml, decision_dict, api_latency_ms, current_action, STANDING_ORDERS)
-
-                    # ── Fire API request every TICKS_PER_DECISION ticks ────
-                    if tick_count >= TICKS_PER_DECISION and api_task is None:
-                        tick_count  = 0
-                        state_yaml  = serialize_state(state, STANDING_ORDERS)
-                        visible_enemies = _collect_enemies(state, player_x, player_y)
-                        api_start   = time.perf_counter()
-                        api_task    = asyncio.create_task(
-                            jev_client.get_decision(state_yaml, visible_enemies)
-                        )
-
-                    # ── Advance engine one tick, then sleep to hold 35fps ─────
-                    tick_start = time.perf_counter()
+                # ── Poll pending API task ──────────────────────────────
+                if api_task is not None and api_task.done():
+                    api_end = time.perf_counter()
                     try:
-                        game.make_action(current_action, 1)
-                    except vzd.ViZDoomUnexpectedExitException:
-                        return
-                    # Sleep for the remainder of the tick window so the game
-                    # runs at real Doom speed (35 ticks/sec = 28.57 ms/tick)
-                    elapsed = time.perf_counter() - tick_start
-                    sleep_s = TICK_INTERVAL - elapsed
-                    if sleep_s > 0:
-                        await asyncio.sleep(sleep_s)
+                        decision = api_task.result()
+                        api_latency_ms = (api_end - api_start) * 1000
+                    except Exception:
+                        decision = None
+                    api_task = None
 
-                    tick_count += 1
+                    # Recompute action from latest decision + current state
+                    if decision:
+                        action_tuple   = resolve_dag(decision, state)
+                        current_action = format_action_array(
+                            action_tuple, firing_confidence=decision.firing.confidence
+                        )
+                    else:
+                        current_action = NOOP[:]
 
-                # Cancel any dangling request at end of episode
-                if api_task is not None:
-                    api_task.cancel()
+                    app.update_telemetry(decision, state_yaml, api_latency_ms, current_action, state)
 
-        finally:
-            await jev_client.close()
-            game.close()
+                # ── Fire API request every TICKS_PER_DECISION ticks ────
+                if tick_count >= TICKS_PER_DECISION and api_task is None:
+                    tick_count  = 0
+                    state_yaml  = serialize_state(state, STANDING_ORDERS)
+                    visible_enemies = _collect_enemies(state, player_x, player_y)
+                    api_start   = time.perf_counter()
+                    api_task    = asyncio.create_task(
+                        jev_client.get_decision(state_yaml, visible_enemies)
+                    )
+
+                # ── Render unified UI frame ─────────────────────────────
+                app.render(state.screen_buffer if state else None)
+
+                # ── Advance engine one tick, then sleep to hold 35fps ─────
+                tick_start = time.perf_counter()
+                try:
+                    game.make_action(current_action, 1)
+                except vzd.ViZDoomUnexpectedExitException:
+                    return
+                # Sleep for the remainder of the tick window so the game
+                # runs at real Doom speed (35 ticks/sec = 28.57 ms/tick)
+                elapsed = time.perf_counter() - tick_start
+                sleep_s = TICK_INTERVAL - elapsed
+                if sleep_s > 0:
+                    await asyncio.sleep(sleep_s)
+
+                tick_count += 1
+
+            # Cancel any dangling request at end of episode
+            if api_task is not None:
+                api_task.cancel()
+
+    finally:
+        await jev_client.close()
+        game.close()
+        import pygame
+        pygame.quit()
 
 
 async def main():
-    listener_task = asyncio.create_task(input_listener())
-    game_task     = asyncio.create_task(run_game())
-    try:
-        await game_task
-    finally:
-        listener_task.cancel()
+    await run_game()
 
 
 if __name__ == "__main__":
