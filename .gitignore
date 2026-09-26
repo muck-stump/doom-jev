@@ -9,6 +9,9 @@ __pycache__/
 *$py.class
 *.so
 
+# Nixos artifacts
+result*
+
 # Virtual environment
 jevEnv/
 venv/
