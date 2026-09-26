@@ -106,8 +106,9 @@ class VisibleEnemy:
 
 class JevClient:
     def __init__(self):
-        self.api_key = os.getenv("TYPESAFE_API_KEY")
-        self.url = "https://api.typesafe.ai/v1/systemone"
+        self.api_key = os.getenv("API_KEY")
+        self.url = f"https://{os.getenv("ENDPOINT")}/v1/systemone"
+        # self.url = "https://api.typesafe.ai/v1/systemone"
         self.client = httpx.AsyncClient(timeout=1.5)
 
     async def get_decision(

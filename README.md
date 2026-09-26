@@ -125,6 +125,9 @@ source jevEnv/bin/activate
 pip install -r requirements.txt
 ```
 
+Note for nixos: make sure to use `nix develop` before installing dependincies. 
+This builds vizdoom from scratch
+
 ### 3. Configure API Credentials
 
 Copy `.env.example` to `.env` and add your TypeSafe API key:
@@ -135,7 +138,8 @@ cp .env.example .env
 
 Edit `.env`:
 ```ini
-TYPESAFE_API_KEY=your_actual_api_key_here
+ENDPOINT=your_system_one_compatible_endpoint
+API_KEY=your_actual_api_key_here
 DOOM_SCENARIO=deathmatch.wad
 DOOM_MAP=map01
 ```
